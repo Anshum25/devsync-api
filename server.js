@@ -56,8 +56,6 @@ async function sendEmail({ to, subject, text, html, attachments = [] }) {
   const FROM_EMAIL = process.env.FROM_EMAIL || user || 'no-reply@devsync.local';
   if (RESEND_API_KEY) {
     try {
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), 10000);
       const payload = {
         from: FROM_EMAIL,
         to: Array.isArray(to) ? to : [to],
@@ -70,24 +68,22 @@ async function sendEmail({ to, subject, text, html, attachments = [] }) {
           path: a.path,
         })).filter(x => x.content || x.path),
       };
-      const r = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
+      const { status, data } = await axios.post('https://api.resend.com/emails', payload, {
         headers: {
-          'Authorization': `Bearer ${RESEND_API_KEY}`,
+          Authorization: `Bearer ${RESEND_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
+        timeout: 10000,
       });
-      clearTimeout(id);
-      if (!r.ok) {
-        const t = await r.text();
-        throw new Error(`Resend ${r.status}: ${t}`);
+      if (status < 200 || status >= 300) {
+        throw new Error(`Resend ${status}: ${JSON.stringify(data)}`);
       }
       return { ok: true, via: 'resend' };
     } catch (e) {
-      console.error('[email] Resend fallback failed:', e?.message || e);
+      console.error('[email] Resend fallback failed:', e?.response?.status, e?.response?.data || e?.message || e);
     }
+  } else {
+    console.warn('[email] RESEND_API_KEY not set; fallback unavailable');
   }
 
   return { ok: false };
