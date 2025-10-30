@@ -21,6 +21,71 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'devsync-api', time: new Date().toISOString() });
 });
 
+// Generic email sender with fallback: SMTP -> Resend API (if available)
+async function sendEmail({ to, subject, text, html, attachments = [] }) {
+  const host = process.env.SMTP_HOST;
+  const port = Number(process.env.SMTP_PORT || 587);
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+
+  // 1) Try SMTP first if configured
+  if (host && user && pass) {
+    try {
+      const transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure: port === 465,
+        auth: { user, pass },
+      });
+      await transporter.sendMail({ from: user, to, subject, text, html, attachments });
+      return { ok: true, via: 'smtp' };
+    } catch (e) {
+      console.warn('[email] SMTP failed, falling back:', e?.message || e);
+    }
+  }
+
+  // 2) Fallback to Resend if key present
+  const RESEND_API_KEY = process.env.RESEND_API_KEY;
+  const FROM_EMAIL = process.env.FROM_EMAIL || user || 'no-reply@devsync.local';
+  if (RESEND_API_KEY) {
+    try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 10000);
+      const payload = {
+        from: FROM_EMAIL,
+        to: Array.isArray(to) ? to : [to],
+        subject,
+        html,
+        text,
+        attachments: (attachments || []).map(a => ({
+          filename: a.filename || 'attachment',
+          content: a.content ? (Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content) : undefined,
+          path: a.path,
+        })).filter(x => x.content || x.path),
+      };
+      const r = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      clearTimeout(id);
+      if (!r.ok) {
+        const t = await r.text();
+        throw new Error(`Resend ${r.status}: ${t}`);
+      }
+      return { ok: true, via: 'resend' };
+    } catch (e) {
+      console.error('[email] Resend fallback failed:', e?.message || e);
+    }
+  }
+
+  return { ok: false };
+}
+
 // Contact: send simple message
 app.post('/api/contact/send', async (req, res) => {
   try {
@@ -28,23 +93,6 @@ app.post('/api/contact/send', async (req, res) => {
     if (!name || !email || !message) {
       return res.status(400).json({ ok: false, message: 'Missing required fields' });
     }
-
-    const to = process.env.CAREERS_TO_EMAIL || 'anshum25506@gmail.com';
-    const host = process.env.SMTP_HOST;
-    const port = Number(process.env.SMTP_PORT || 587);
-    const user = process.env.SMTP_USER;
-    const pass = process.env.SMTP_PASS;
-
-    if (!host || !user || !pass) {
-      return res.status(500).json({ ok: false, message: 'SMTP not configured on server' });
-    }
-
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      auth: { user, pass },
-    });
 
     const subject = `New Contact Message — ${name}`;
     const text = `New contact message received\n\nName: ${name}\nEmail: ${email}\n\nMessage:\n${message}`;
@@ -56,8 +104,10 @@ app.post('/api/contact/send', async (req, res) => {
       <pre style="white-space:pre-wrap;font-family:inherit;">${message}</pre>
     `;
 
-    await transporter.sendMail({ from: user, to, subject, text, html });
-    return res.json({ ok: true });
+    const to = process.env.CAREERS_TO_EMAIL || 'anshum25506@gmail.com';
+    const sent = await sendEmail({ to, subject, text, html });
+    if (!sent.ok) return res.status(500).json({ ok: false, message: 'Failed to send message' });
+    return res.json({ ok: true, via: sent.via });
   } catch (err) {
     console.error('[contact] send error:', err.message || err);
     return res.status(500).json({ ok: false, message: 'Failed to send message' });
@@ -70,23 +120,6 @@ app.post('/api/careers/apply', async (req, res) => {
     if (!name || !email || !position || !message) {
       return res.status(400).json({ ok: false, message: 'Missing required fields' });
     }
-
-    const to = process.env.CAREERS_TO_EMAIL || 'anshum25506@gmail.com';
-    const host = process.env.SMTP_HOST;
-    const port = Number(process.env.SMTP_PORT || 587);
-    const user = process.env.SMTP_USER;
-    const pass = process.env.SMTP_PASS;
-
-    if (!host || !user || !pass) {
-      return res.status(500).json({ ok: false, message: 'SMTP not configured on server' });
-    }
-
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      auth: { user, pass },
-    });
 
     const subject = `New Job Application: ${position} — ${name}`;
     const text = `New application received\n\nName: ${name}\nEmail: ${email}\nPosition: ${position}\n\nMessage:\n${message}`;
@@ -113,8 +146,10 @@ app.post('/api/careers/apply', async (req, res) => {
       }
     }
 
-    await transporter.sendMail({ from: user, to, subject, text, html, attachments });
-    return res.json({ ok: true });
+    const to = process.env.CAREERS_TO_EMAIL || 'anshum25506@gmail.com';
+    const sent = await sendEmail({ to, subject, text, html, attachments });
+    if (!sent.ok) return res.status(500).json({ ok: false, message: 'Failed to send application' });
+    return res.json({ ok: true, via: sent.via });
   } catch (err) {
     console.error('[careers] apply error:', err.message || err);
     return res.status(500).json({ ok: false, message: 'Failed to send application' });
