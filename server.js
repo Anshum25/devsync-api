@@ -37,10 +37,17 @@ async function sendEmail({ to, subject, text, html, attachments = [] }) {
         secure: port === 465,
         auth: { user, pass },
       });
-      await transporter.sendMail({ from: user, to, subject, text, html, attachments });
+      const sendPromise = transporter.sendMail({ from: user, to, subject, text, html, attachments });
+      const timeoutMs = 5000; // 5s SMTP timeout
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('smtp_timeout')), timeoutMs));
+      await Promise.race([sendPromise, timeoutPromise]);
       return { ok: true, via: 'smtp' };
     } catch (e) {
-      console.warn('[email] SMTP failed, falling back:', e?.message || e);
+      if (e?.message === 'smtp_timeout') {
+        console.warn('[email] SMTP timed out after 5s, falling back');
+      } else {
+        console.warn('[email] SMTP failed, falling back:', e?.message || e);
+      }
     }
   }
 
