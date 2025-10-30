@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import axios from 'axios';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -9,7 +10,7 @@ const app = express();
 const PORT = 5001;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 
 // Simple in-memory cache
 let cache = {
@@ -18,6 +19,106 @@ let cache = {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'devsync-api', time: new Date().toISOString() });
+});
+
+// Contact: send simple message
+app.post('/api/contact/send', async (req, res) => {
+  try {
+    const { name, email, message } = req.body || {};
+    if (!name || !email || !message) {
+      return res.status(400).json({ ok: false, message: 'Missing required fields' });
+    }
+
+    const to = process.env.CAREERS_TO_EMAIL || 'anshum25506@gmail.com';
+    const host = process.env.SMTP_HOST;
+    const port = Number(process.env.SMTP_PORT || 587);
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+
+    if (!host || !user || !pass) {
+      return res.status(500).json({ ok: false, message: 'SMTP not configured on server' });
+    }
+
+    const transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: { user, pass },
+    });
+
+    const subject = `New Contact Message — ${name}`;
+    const text = `New contact message received\n\nName: ${name}\nEmail: ${email}\n\nMessage:\n${message}`;
+    const html = `
+      <h2>New Contact Message</h2>
+      <p><strong>Name:</strong> ${name}</p>
+      <p><strong>Email:</strong> ${email}</p>
+      <p><strong>Message:</strong></p>
+      <pre style="white-space:pre-wrap;font-family:inherit;">${message}</pre>
+    `;
+
+    await transporter.sendMail({ from: user, to, subject, text, html });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[contact] send error:', err.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to send message' });
+  }
+});
+// Careers: application email
+app.post('/api/careers/apply', async (req, res) => {
+  try {
+    const { name, email, position, message, resume } = req.body || {};
+    if (!name || !email || !position || !message) {
+      return res.status(400).json({ ok: false, message: 'Missing required fields' });
+    }
+
+    const to = process.env.CAREERS_TO_EMAIL || 'anshum25506@gmail.com';
+    const host = process.env.SMTP_HOST;
+    const port = Number(process.env.SMTP_PORT || 587);
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+
+    if (!host || !user || !pass) {
+      return res.status(500).json({ ok: false, message: 'SMTP not configured on server' });
+    }
+
+    const transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: { user, pass },
+    });
+
+    const subject = `New Job Application: ${position} — ${name}`;
+    const text = `New application received\n\nName: ${name}\nEmail: ${email}\nPosition: ${position}\n\nMessage:\n${message}`;
+    const html = `
+      <h2>New Job Application</h2>
+      <p><strong>Name:</strong> ${name}</p>
+      <p><strong>Email:</strong> ${email}</p>
+      <p><strong>Position:</strong> ${position}</p>
+      <p><strong>Message:</strong></p>
+      <pre style="white-space:pre-wrap;font-family:inherit;">${message}</pre>
+    `;
+
+    const attachments = [];
+    if (resume?.contentBase64 && resume?.filename) {
+      try {
+        const content = Buffer.from(resume.contentBase64, 'base64');
+        attachments.push({
+          filename: resume.filename,
+          content,
+          contentType: resume.mime || 'application/octet-stream',
+        });
+      } catch (e) {
+        console.warn('[careers] failed to parse resume attachment:', e?.message || e);
+      }
+    }
+
+    await transporter.sendMail({ from: user, to, subject, text, html, attachments });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[careers] apply error:', err.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to send application' });
+  }
 });
 
 app.get('/api/news/top-headlines', async (req, res) => {
