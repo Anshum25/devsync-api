@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import axios from 'axios';
 import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 
 dotenv.config();
 
@@ -22,7 +23,9 @@ app.get('/api/health', (_req, res) => {
 });
 
 // Generic email sender with fallback: SMTP -> Resend API (if available)
-async function sendEmail({ to, subject, text, html, attachments = [] }) {
+const resend = new Resend(process.env.RESEND_API_KEY || '');
+
+async function sendEmail({ to, subject, text, html, attachments = [], replyTo }) {
   const host = process.env.SMTP_HOST;
   const port = Number(process.env.SMTP_PORT || 587);
   const user = process.env.SMTP_USER;
@@ -53,34 +56,31 @@ async function sendEmail({ to, subject, text, html, attachments = [] }) {
 
   // 2) Fallback to Resend if key present
   const RESEND_API_KEY = process.env.RESEND_API_KEY;
-  const FROM_EMAIL = process.env.FROM_EMAIL || user || 'no-reply@devsync.local';
+  const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev';
   if (RESEND_API_KEY) {
     try {
-      const payload = {
+      const send = resend.emails.send({
         from: FROM_EMAIL,
         to: Array.isArray(to) ? to : [to],
         subject,
         html,
         text,
+        reply_to: replyTo,
         attachments: (attachments || []).map(a => ({
           filename: a.filename || 'attachment',
           content: a.content ? (Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content) : undefined,
-          path: a.path,
-        })).filter(x => x.content || x.path),
-      };
-      const { status, data } = await axios.post('https://api.resend.com/emails', payload, {
-        headers: {
-          Authorization: `Bearer ${RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 10000,
+        })).filter(x => x.content),
       });
-      if (status < 200 || status >= 300) {
-        throw new Error(`Resend ${status}: ${JSON.stringify(data)}`);
-      }
+      const timeoutMs = 10000;
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('resend_timeout')), timeoutMs));
+      await Promise.race([send, timeoutPromise]);
       return { ok: true, via: 'resend' };
     } catch (e) {
-      console.error('[email] Resend fallback failed:', e?.response?.status, e?.response?.data || e?.message || e);
+      if (e?.message === 'resend_timeout') {
+        console.error('[email] Resend timeout after 10s');
+      } else {
+        console.error('[email] Resend fallback failed:', e?.response?.status, e?.response?.data || e?.message || e);
+      }
     }
   } else {
     console.warn('[email] RESEND_API_KEY not set; fallback unavailable');
@@ -108,7 +108,7 @@ app.post('/api/contact/send', async (req, res) => {
     `;
 
     const to = process.env.CAREERS_TO_EMAIL || 'anshum25506@gmail.com';
-    const sent = await sendEmail({ to, subject, text, html });
+    const sent = await sendEmail({ to, subject, text, html, replyTo: email });
     if (!sent.ok) return res.status(500).json({ ok: false, message: 'Failed to send message' });
     return res.json({ ok: true, via: sent.via });
   } catch (err) {
@@ -150,7 +150,7 @@ app.post('/api/careers/apply', async (req, res) => {
     }
 
     const to = process.env.CAREERS_TO_EMAIL || 'anshum25506@gmail.com';
-    const sent = await sendEmail({ to, subject, text, html, attachments });
+    const sent = await sendEmail({ to, subject, text, html, attachments, replyTo: email });
     if (!sent.ok) return res.status(500).json({ ok: false, message: 'Failed to send application' });
     return res.json({ ok: true, via: sent.via });
   } catch (err) {
